@@ -1,19 +1,9 @@
+#! /usr/bin/env python3
 
 from enum import Enum, auto, unique
+from copy import copy
+import math, sys
 
-# Utils
-
-def is_whitespace(c):
-    # Don't allow newline in expressions
-    return c == ' '
-
-def is_digit(c):
-    return '0' <= c and c <= '9'
-
-def is_alphabetic(c):
-    return ('a' <= c and c <= 'z') or ('A' <= c and c <= 'Z')
-
-# Exceptions
 class IllegalCharacter(Exception):
     def __init__(self, char, pos):
         self.char = char
@@ -36,7 +26,7 @@ class UnexpectedToken(Exception):
         self.pos = found.pos
 
     def __str__(self):
-        return f"Unexpected token {self.found.tag}: {self.msg}"
+        return f"Unexpected token {TokenTag.string(self.found.tag)}: {self.msg}"
 
 class SubstitutionError(Exception):
     def __init__(self, token):
@@ -67,6 +57,18 @@ class FuncTag(Enum):
     TAN = auto()
     LOG = auto()
 
+function_map = { FuncTag.EXP: math.exp,
+                FuncTag.SIN: math.sin,
+                FuncTag.COS: math.cos,
+                FuncTag.TAN: math.tan,
+                FuncTag.LOG: math.log }
+
+function_names = { FuncTag.EXP: "exp",
+                  FuncTag.SIN: "sin",
+                  FuncTag.COS: "cos",
+                  FuncTag.TAN: "tan",
+                  FuncTag.LOG: "log" }
+
 @unique
 class TokenTag(Enum):
     PLUS = auto()
@@ -79,6 +81,21 @@ class TokenTag(Enum):
     VAR = auto()
     FUNCTION = auto()
     NUMBER = auto()
+
+    @staticmethod
+    def string(tag):
+        return token_tag_strings[tag]
+
+token_tag_strings = { TokenTag.PLUS: '+',
+                     TokenTag.MINUS: '-',
+                     TokenTag.ASTERISK: '*',
+                     TokenTag.SLASH: '/',
+                     TokenTag.CARET: '^',
+                     TokenTag.LPAREN: '(',
+                     TokenTag.RPAREN: ')',
+                     TokenTag.VAR: 'variable',
+                     TokenTag.FUNCTION: 'function',
+                     TokenTag.NUMBER: 'number' }
 
 class Token:
     def __init__(self, tag, pos):
@@ -100,7 +117,8 @@ class Lexer:
               "sin": FuncTag.SIN,
               "cos": FuncTag.COS,
               "tan": FuncTag.TAN,
-              "log": FuncTag.LOG }
+              "log": FuncTag.LOG,
+              "ln":  FuncTag.LOG }
 
     ops = { "+": TokenTag.PLUS,
             "-": TokenTag.MINUS,
@@ -110,12 +128,27 @@ class Lexer:
             "(": TokenTag.LPAREN,
             ")": TokenTag.RPAREN }
 
+    consts = { "e": math.e,
+               "pi": math.pi }
+
     def __init__(self, source, table):
         self.source = source
         self.cursor = 0
         self.peeked = None
         self.length = len(source)
         self.table = table
+
+    @staticmethod
+    def is_whitespace(c):
+        return c == ' '
+
+    @staticmethod
+    def is_digit(c):
+        return '0' <= c and c <= '9'
+
+    @staticmethod
+    def is_alphabetic(c):
+        return ('a' <= c and c <= 'z') or ('A' <= c and c <= 'Z')
 
     def advance(self):
         self.cursor += 1
@@ -133,7 +166,7 @@ class Lexer:
     def number(self):
         begin = self.cursor
         x = 0
-        while is_digit(self.current()):
+        while Lexer.is_digit(self.current()):
             x *= 10
             x += ord(self.current()) - ord('0')
             self.advance()
@@ -145,7 +178,7 @@ class Lexer:
 
     def identifier(self):
         begin = self.cursor
-        while is_alphabetic(self.current()):
+        while Lexer.is_alphabetic(self.current()):
             self.advance()
             if self.at_end():
                 break
@@ -154,7 +187,12 @@ class Lexer:
             token = Token(TokenTag.FUNCTION, begin)
             token.func = Lexer.funcs[name]
             return token
+        if name in Lexer.consts:
+            token = Token(TokenTag.NUMBER, begin)
+            token.value = Lexer.consts[name]
+            return token
         token = Token(TokenTag.VAR, begin)
+        token.name = self.source[begin:self.cursor]
         token.id = self.table.resolve(name)
         return token
 
@@ -167,7 +205,7 @@ class Lexer:
         if self.at_end():
             return None
 
-        while is_whitespace(self.current()):
+        while Lexer.is_whitespace(self.current()):
             self.advance()
             if self.at_end():
                 return None
@@ -175,8 +213,8 @@ class Lexer:
         c = self.current()
 
         if c in Lexer.ops: return self.operator(Lexer.ops[c])
-        if is_digit(c): return self.number()
-        if is_alphabetic(c): return self.identifier()
+        if Lexer.is_digit(c): return self.number()
+        if Lexer.is_alphabetic(c): return self.identifier()
 
         raise IllegalCharacter(c, self.cursor)
 
@@ -188,6 +226,7 @@ class Lexer:
     def cursor(self):
         return _cursor
 
+@unique
 class NodeTag(Enum):
     ADD = auto()
     SUB = auto()
@@ -198,6 +237,15 @@ class NodeTag(Enum):
     FUNCTION = auto()
     VAR = auto()
     NUMBER = auto()
+
+precedence = { NodeTag.ADD: 0,
+              NodeTag.SUB: 0,
+              NodeTag.MUL: 1,
+              NodeTag.DIV: 1,
+              NodeTag.EXP: 2,
+              NodeTag.FUNCTION: 3,
+              NodeTag.VAR: 3,
+              NodeTag.NUMBER: 3 }
 
 class Node:
     def __init__(self):
@@ -255,11 +303,12 @@ class Node:
 
     # Init variable
     @staticmethod
-    def var(token, id):
+    def var(token, id, name):
         self = Node()
         self.tag = NodeTag.VAR
         self.token = token
         self.id = id
+        self.name = name
         return self
 
     # Init number
@@ -344,7 +393,7 @@ class Node:
             return self.left.eval(subst) - self.right.eval(subst)
         if self.tag == NodeTag.MUL:
             return self.left.eval(subst) * self.right.eval(subst)
-        if self.tag == NodeTag.ADD:
+        if self.tag == NodeTag.DIV:
             return self.left.eval(subst) / self.right.eval(subst)
         if self.tag == NodeTag.NEG:
             return -self.operand.eval(subst)
@@ -357,6 +406,49 @@ class Node:
                 raise SubstitutionError(self.token)
         if self.tag == NodeTag.NUMBER:
             return self.value
+        if self.tag == NodeTag.FUNCTION:
+            return function_map[self.func](self.arg.eval(subst))
+        return 0
+
+    def __str__(self):
+        if self.tag == NodeTag.ADD:
+            return f"{self.left} + {self.right}"
+        if self.tag == NodeTag.SUB:
+            if precedence[self.right.tag] <= precedence[self.tag]:
+                return f"{self.left} - ({self.right})"
+            return f"{self.left} - {self.right}"
+        if self.tag == NodeTag.MUL:
+            left, right = None, None
+            if precedence[self.left.tag] < precedence[self.tag]:
+                left = f"({self.left})"
+            else:
+                left = f"{self.left}"
+            if precedence[self.right.tag] < precedence[self.tag]:
+                right = f"({self.right})"
+            else:
+                right = f"{self.right}"
+            return f"{left} * {right}"
+        if self.tag == NodeTag.DIV:
+            left, right = None, None
+            if precedence[self.left.tag] < precedence[self.tag]:
+                left = f"({self.left})"
+            else:
+                left = f"{self.left}"
+            if precedence[self.right.tag] <= precedence[self.tag]:
+                right = f"({self.right})"
+            else:
+                right = f"{self.right}"
+            return f"{left} / {right}"
+        if self.tag == NodeTag.EXP:
+            if precedence[self.exponent.tag] < precedence[self.tag]:
+                return f"{self.base} ^ ({self.exponent})"
+            return f"{self.base} ^ {self.exponent}"
+        if self.tag == NodeTag.FUNCTION:
+            return f"{function_names[self.func]}({self.arg})"
+        if self.tag == NodeTag.VAR:
+            return self.name
+        if self.tag == NodeTag.NUMBER:
+            return str(self.value)
 
 class Parser:
     def __init__(self, lexer):
@@ -440,7 +532,7 @@ class Parser:
         # Variable
         elif token.tag == TokenTag.VAR:
             self.lexer.take()
-            node = Node.var(token, token.id)
+            node = Node.var(token, token.id, token.name)
         # Undefined
         else:
             raise UnexpectedToken(token, "unexpected token in expression")
@@ -461,21 +553,122 @@ class Parser:
             raise UnexpectedToken(token, msg)
         return token
 
-def main():
-    expr = "1 + 2 ^ x * 3"
-    table = Table()
-    lexer = Lexer(expr, table)
-    parser = Parser(lexer)
+class ParsedExpression:
+    def __init__(self, expr_string):
+        self.expr_string = expr_string
+        self.table = Table()
+        self.root = None
+        lexer = Lexer(self.expr_string, self.table)
+        parser = Parser(lexer)
+        self.root = parser.parse()
+
+# Base class for defining passes over the AST
+class Pass:
+    def __init__(self):
+        pass
+    def exec(self, root):
+        if root == None:
+            return None
+        if root.tag == NodeTag.ADD:
+            return self.add(root)
+        if root.tag == NodeTag.SUB:
+            return self.sub(root)
+        if root.tag == NodeTag.MUL:
+            return self.mul(root)
+        if root.tag == NodeTag.DIV:
+            return self.div(root)
+        if root.tag == NodeTag.EXP:
+            return self.exp(root)
+        if root.tag == NodeTag.FUNCTION:
+            return self.function(root)
+        if root.tag == NodeTag.NUMBER:
+            return self.number(root)
+        if root.tag == NodeTag.VAR:
+            return self.var(root)
+    def add(self, root): return root
+    def sub(self, root): return root
+    def mul(self, root): return root
+    def div(self, root): return root
+    def exp(self, root): return root
+    def function(self, root): return root
+    def number(self, root): return root
+    def var(self, root): return root
+
+class Simplify(Pass):
+    def add(self, root):
+        root.left = self.exec(root.left)
+        root.right = self.exec(root.right)
+        if root.left.tag == NodeTag.NUMBER and root.right.tag == NodeTag.NUMBER:
+            root.tag = NodeTag.NUMBER
+            root.value = root.left.value + root.right.value
+            del root.left
+            del root.right
+        return root
+
+    def sub(self, root):
+        root.left = self.exec(root.left)
+        root.right = self.exec(root.right)
+        if root.left.tag == NodeTag.NUMBER and root.right.tag == NodeTag.NUMBER:
+            root.tag = NodeTag.NUMBER
+            root.value = root.left.value - root.right.value
+            del root.left
+            del root.right
+        return root
+
+    def mul(self, root):
+        root.left = self.exec(root.left)
+        root.right = self.exec(root.right)
+        if root.left.tag == NodeTag.NUMBER and root.right.tag == NodeTag.NUMBER:
+            root.tag = NodeTag.NUMBER
+            root.value = root.left.value * root.right.value
+            del root.left
+            del root.right
+        return root
+
+    def div(self, root):
+        root.left = self.exec(root.left)
+        root.right = self.exec(root.right)
+        if root.left.tag == NodeTag.NUMBER and root.right.tag == NodeTag.NUMBER:
+            root.tag = NodeTag.NUMBER
+            root.value = root.left.value / root.right.value
+            del root.left
+            del root.right
+        return root
+
+    def exp(self, root):
+        root.base = self.exec(root.base)
+        root.exponent = self.exec(root.exponent)
+        if root.base.tag == NodeTag.NUMBER and root.exponent.tag == NodeTag.NUMBER:
+            root.tag = NodeTag.NUMBER
+            root.value = root.base.value ** root.exponent.value
+            del root.base
+            del root.exponent
+        return root
+
+    def function(self, root):
+        root.arg = self.exec(root.arg)
+        if root.arg.tag == NodeTag.NUMBER:
+            root.tag = NodeTag.NUMBER
+            root.value = function_map[root.func](root.arg.value)
+            del root.func
+            del root.arg
+        return root
+
+def _main():
+    if len(sys.argv) == 1:
+        sys.exit("Error: missing expression string")
+    string = sys.argv[1]
+    expr = None
     try:
-        root = parser.parse()
-        print("Parsed successfully")
-        root.print(0, None)
-        print("let x = 3")
-        subst = { table.resolve("x"): 3 }
-        print(expr + " = " + str(root.eval(subst)))
+        expr = ParsedExpression(string)
     except Exception as e:
         print(e)
-        print(expr)
+        print(string)
         print(' ' * e.pos + '^')
+        sys.exit(-1)
+    simplify = Simplify()
+    expr.root = simplify.exec(expr.root)
+    print(expr.root)
+    pass
 
-if __name__ == "__main__": main()
+if __name__ == "__main__": _main()
